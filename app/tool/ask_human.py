@@ -1,6 +1,5 @@
 from app.tool import BaseTool
 
-
 class AskHuman(BaseTool):
     """Add a tool to ask human for help."""
 

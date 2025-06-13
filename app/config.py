@@ -1,8 +1,11 @@
 import json
 import threading
 import tomllib
+import shutil
+import os
 from pathlib import Path
 from typing import Dict, List, Optional
+from datetime import datetime
 
 from pydantic import BaseModel, Field
 
@@ -13,7 +16,10 @@ def get_project_root() -> Path:
 
 
 PROJECT_ROOT = get_project_root()
-WORKSPACE_ROOT = PROJECT_ROOT / "workspace"
+# -----------------------------------------------------
+# Workspace directory
+# -----------------------------------------------------
+# WORKSPACE_ROOT will be defined in the Config class and loaded from config.toml
 
 
 class LLMSettings(BaseModel):
@@ -28,6 +34,16 @@ class LLMSettings(BaseModel):
     temperature: float = Field(1.0, description="Sampling temperature")
     api_type: str = Field(..., description="Azure, Openai, or Ollama")
     api_version: str = Field(..., description="Azure Openai version if AzureOpenai")
+
+
+### ADDED BY BJARKE
+class ManusAgentSettings(BaseModel):
+    """Configuration specific to the Manus agent"""
+    max_steps: int = Field(default=10, description="Maximum steps for Manus agent execution")
+
+class RealEstateAgentSettings(BaseModel):
+    """Configuration specific to the Real Estate agent"""
+    max_steps: int = Field(default=20, description="Maximum steps for Real Estate agent execution")
 
 
 class ProxySettings(BaseModel):
@@ -55,14 +71,20 @@ class SearchSettings(BaseModel):
         description="Language code for search results (e.g., en, zh, fr)",
     )
     country: str = Field(
-        default="us",
-        description="Country code for search results (e.g., us, cn, uk)",
+        default="dk",
+        description="Country code for search results (e.g., dk, cn, uk, us)",
     )
 
 
 class RunflowSettings(BaseModel):
     use_data_analysis_agent: bool = Field(
         default=False, description="Enable data analysis agent in run flow"
+    )
+    query: Optional[str] = Field(
+        default=None, description="Optional default prompt to execute instead of interactive input"
+    )
+    max_steps: int = Field(
+        default=5, description="Maximum number of steps for the agent to execute"
     )
 
 
@@ -152,8 +174,17 @@ class MCPSettings(BaseModel):
             raise ValueError(f"Failed to load MCP server config: {e}")
 
 
+# -----------------------------------------------------
+# I/O DIRECTORY SETTINGS
+# -----------------------------------------------------
+# IOSettings class removed, workspace_root will be used instead.
+
+
 class AppConfig(BaseModel):
     llm: Dict[str, LLMSettings]
+    workspace_root: Path = Field(..., description="Root directory for all application data, inputs, and outputs")
+    input_dir: Optional[Path] = Field(None, description="Optional directory from which to copy initial files to workspace_root")
+    output_dir: Optional[Path] = Field(None, description="Optional directory to copy run outputs to after completion")
     sandbox: Optional[SandboxSettings] = Field(
         None, description="Sandbox configuration"
     )
@@ -166,6 +197,17 @@ class AppConfig(BaseModel):
     mcp_config: Optional[MCPSettings] = Field(None, description="MCP configuration")
     run_flow_config: Optional[RunflowSettings] = Field(
         None, description="Run flow configuration"
+    )
+    # io_config removed
+
+    #Added by bjarke:     We set the parameters of the manus and real estate agents. 
+    manus_agent_config: ManusAgentSettings = Field(
+        default_factory=ManusAgentSettings,
+        description="Manus agent specific configuration"
+    )
+    real_estate_agent_config: RealEstateAgentSettings = Field(
+        default_factory=RealEstateAgentSettings,
+        description="Real Estate agent specific configuration"
     )
 
     class Config:
@@ -189,7 +231,41 @@ class Config:
             with self._lock:
                 if not self._initialized:
                     self._config = None
+                    print("[Config] Initializing configuration...")
                     self._load_initial_config()
+
+                    # The original workspace_root from config.toml
+                    base_workspace_root = self.workspace_root
+                    print(f"[Config] Base workspace root is: {base_workspace_root}")
+
+                    # Create a timestamped subdirectory for this run's outputs
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    runs_base_dir = base_workspace_root / "runs"
+                    self._run_output_dir = runs_base_dir / ts
+                    self._run_output_dir.mkdir(parents=True, exist_ok=True)
+                    print(f"[Config] Created run-specific workspace: {self._run_output_dir}")
+
+                    # IMPORTANT: Re-assign workspace_root to be the run-specific directory for this run
+                    self._config.workspace_root = self._run_output_dir
+                    print(f"[Config] Active workspace for this run is now: {self.workspace_root}")
+
+                    # If an input directory is specified, copy its contents into the new run-specific workspace
+                    print(f"[Config] Checking for input_dir. Value: {self.input_dir}")
+                    if self.input_dir:
+                        print(f"[Config] Recursively copying all contents from '{self.input_dir}' to '{self.workspace_root}'...")
+                        if not self.input_dir.is_dir():
+                            print(f"[Config] ERROR: Input directory '{self.input_dir}' is not a valid directory. Skipping copy.")
+                            return
+
+                        try:
+                            # This recursively copies everything from the input_dir into the new run-specific workspace.
+                            shutil.copytree(str(self.input_dir), str(self.workspace_root), dirs_exist_ok=True)
+                            print("[Config] Recursive file copy process completed successfully.")
+                        except Exception as e:
+                            print(f"[Config] ERROR: An error occurred during recursive file copy: {e}")
+                    else:
+                        print("[Config] No input_dir configured. Skipping file copy.")
+
                     self._initialized = True
 
     @staticmethod
@@ -283,6 +359,39 @@ class Config:
             run_flow_settings = RunflowSettings(**run_flow_config)
         else:
             run_flow_settings = RunflowSettings()
+
+        # ---------------- I/O Config from [io] table ----------------
+        io_config_raw = raw_config.get("io", {})
+
+        # --- Workspace Root Config (Required) ---
+        workspace_root_str = io_config_raw.get("workspace_root")
+        if not workspace_root_str:
+            raise ValueError(
+                "'workspace_root' must be defined under the [io] table in config.toml. "
+                'Example: [io]\nworkspace_root = "path/to/workspace"'
+            )
+        workspace_path = Path(str(workspace_root_str)).expanduser().resolve()
+        workspace_path.mkdir(parents=True, exist_ok=True)
+
+        # --- Input Directory Config (Optional) ---
+        input_dir_str = io_config_raw.get("input_dir")
+        input_path = None
+        if input_dir_str:
+            input_path = Path(str(input_dir_str)).expanduser().resolve()
+            if not input_path.exists():
+                print(f"[Config] WARNING: input_dir '{input_path}' did not exist. Creating it now. It is empty.")
+                input_path.mkdir(parents=True, exist_ok=True)
+            elif not input_path.is_dir():
+                raise ValueError(f"Configured input_dir '{input_path}' under [io] is not a directory.")
+
+        # --- Output Directory Config (Optional) ---
+        output_dir_str = io_config_raw.get("output_dir")
+        output_path = None
+        if output_dir_str:
+            output_path = Path(str(output_dir_str)).expanduser().resolve()
+            output_path.mkdir(parents=True, exist_ok=True)
+
+        # breakpoint() was here, removed.
         config_dict = {
             "llm": {
                 "default": default_settings,
@@ -291,12 +400,24 @@ class Config:
                     for name, override_config in llm_overrides.items()
                 },
             },
+            "workspace_root": workspace_path,
+            "input_dir": input_path, # Added optional input_dir
+            "output_dir": output_path, # Added optional output_dir
             "sandbox": sandbox_settings,
             "browser_config": browser_settings,
             "search_config": search_settings,
             "mcp_config": mcp_settings,
             "run_flow_config": run_flow_settings,
+            # "io_config" removed
         }
+
+        #Added by bjarke:     We set the parameters of the manus and real estate agents. 
+        config_dict.update(
+            manus_agent_config=ManusAgentSettings(**raw_config.get("manus_agent", {})),
+            real_estate_agent_config=RealEstateAgentSettings(
+                **raw_config.get("real_estate_agent", {})
+            ),
+        )
 
         self._config = AppConfig(**config_dict)
 
@@ -328,13 +449,30 @@ class Config:
 
     @property
     def workspace_root(self) -> Path:
-        """Get the workspace root directory"""
-        return WORKSPACE_ROOT
+        # This property now returns the main workspace_root from AppConfig
+        return self._config.workspace_root
 
     @property
-    def root_path(self) -> Path:
-        """Get the root path of the application"""
-        return PROJECT_ROOT
+    def input_dir(self) -> Optional[Path]:
+        return self._config.input_dir
 
+    @property
+    def output_dir(self) -> Optional[Path]:
+        return self._config.output_dir
+
+    # The run_output_dir property still provides the path to the current run's output directory.
+
+    # Directory for this particular execution run
+    @property
+    def run_output_dir(self) -> Path:
+        return self._run_output_dir
+
+    @property
+    def manus_agent_config(self) -> ManusAgentSettings:
+        return self._config.manus_agent_config
+
+    @property
+    def real_estate_agent_config(self) -> RealEstateAgentSettings:
+        return self._config.real_estate_agent_config
 
 config = Config()
