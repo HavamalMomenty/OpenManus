@@ -22,7 +22,12 @@ async def run_flow():
         agents["data_analysis"] = DataAnalysis()
     try:
         # Use predefined query if supplied via config.toml, else ask user.
-        prompt = config.run_flow_config.query
+        if hasattr(config.run_flow_config, 'bfe_number') and config.run_flow_config.bfe_number:
+            BFEprompt = str(config.run_flow_config.bfe_number)
+        else:
+            BFEprompt = input("Enter BFE number: ")
+            
+        prompt = config.run_flow_config.query + " The BFE number is " + BFEprompt
         max_steps = config.run_flow_config.max_steps
         logger.info(f"Max steps configured to: {max_steps}")
         if prompt is None:

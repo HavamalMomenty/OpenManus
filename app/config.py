@@ -80,6 +80,9 @@ class RunflowSettings(BaseModel):
     use_data_analysis_agent: bool = Field(
         default=False, description="Enable data analysis agent in run flow"
     )
+    bfe_number: Optional[int] = Field(
+        default=None, description="BFE number for the run"
+    )
     query: Optional[str] = Field(
         default=None, description="Optional default prompt to execute instead of interactive input"
     )
@@ -89,7 +92,7 @@ class RunflowSettings(BaseModel):
 
 
 class BrowserSettings(BaseModel):
-    headless: bool = Field(False, description="Whether to run browser in headless mode")
+    headless: bool = Field(True, description="Whether to run browser in headless mode")
     disable_security: bool = Field(
         True, description="Disable browser security features"
     )
@@ -125,6 +128,12 @@ class SandboxSettings(BaseModel):
     network_enabled: bool = Field(
         False, description="Whether network access is allowed"
     )
+
+
+class ResightsSettings(BaseModel):
+    """Configuration for the Resights API"""
+    base_url: Optional[str] = Field("https://api.resights.dk/api/v2", description="Resights API base URL")
+    api_key: Optional[str] = Field(None, description="Resights API key")
 
 
 class MCPServerConfig(BaseModel):
@@ -198,6 +207,7 @@ class AppConfig(BaseModel):
     run_flow_config: Optional[RunflowSettings] = Field(
         None, description="Run flow configuration"
     )
+    resights_config: ResightsSettings = Field(default_factory=ResightsSettings)
     # io_config removed
 
     #Added by bjarke:     We set the parameters of the manus and real estate agents. 
@@ -360,6 +370,12 @@ class Config:
         else:
             run_flow_settings = RunflowSettings()
 
+        resights_config = raw_config.get("resights")
+        if resights_config:
+            resights_settings = ResightsSettings(**resights_config)
+        else:
+            resights_settings = ResightsSettings()
+
         # ---------------- I/O Config from [io] table ----------------
         io_config_raw = raw_config.get("io", {})
 
@@ -408,6 +424,7 @@ class Config:
             "search_config": search_settings,
             "mcp_config": mcp_settings,
             "run_flow_config": run_flow_settings,
+            "resights_config": resights_settings,
             # "io_config" removed
         }
 
@@ -446,6 +463,11 @@ class Config:
     def run_flow_config(self) -> RunflowSettings:
         """Get the Run Flow configuration"""
         return self._config.run_flow_config
+
+    @property
+    def resights_config(self) -> ResightsSettings:
+        """Get the Resights API configuration"""
+        return self._config.resights_config
 
     @property
     def workspace_root(self) -> Path:
